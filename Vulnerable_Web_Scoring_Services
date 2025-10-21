@@ -1,0 +1,213 @@
+Vulnerable Web Scoring Application on Port 80
+1. Quick Setup for Apache/PHP
+bash# Install web stack (if not already installed)
+sudo apt-get update
+sudo apt-get install apache2 php libapache2-mod-php php-mysql mysql-server
+
+# Ensure Apache is on port 80
+sudo nano /etc/apache2/ports.conf  # Confirm Listen 80
+sudo systemctl restart apache2
+2. Create Vulnerable Scoring Application
+Create the main scoring directory:
+bashsudo mkdir -p /var/www/html/scoring
+sudo chmod 755 /var/www/html/scoring
+Create /var/www/html/scoring/index.php:
+php<?php
+// Vulnerable CCDC Scoring Dashboard
+$servername = "localhost";
+$username = "scoreuser";  
+$password = "score123";   // Weak password
+$dbname = "ccdc_scores";
+
+// Create connection with NO error handling
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+// Vulnerable login - SQL injection
+if(isset($_POST['login'])) {
+    $user = $_POST['username'];
+    $pass = $_POST['password'];
+    // BAD: Direct SQL injection vulnerability
+    $sql = "SELECT * FROM users WHERE username='$user' AND password='$pass'";
+    $result = mysqli_query($conn, $sql);
+}
+
+// Vulnerable score display - XSS vulnerability  
+if(isset($_GET['team'])) {
+    echo "<h2>Scores for Team: " . $_GET['team'] . "</h2>";
+    // BAD: No input sanitization
+    $team_id = $_GET['team'];
+    $query = "SELECT * FROM scores WHERE team_id = $team_id";
+    $scores = mysqli_query($conn, $query);
+}
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CCDC Scoring Engine</title>
+</head>
+<body>
+    <h1>Competition Scoring System</h1>
+    
+    <!-- Vulnerable login form -->
+    <form method="POST" action="">
+        Username: <input type="text" name="username"><br>
+        Password: <input type="password" name="password"><br>
+        <input type="submit" name="login" value="Login">
+    </form>
+    
+    <!-- Vulnerable team lookup -->
+    <form method="GET" action="">
+        View Team Scores: <input type="text" name="team">
+        <input type="submit" value="View">
+    </form>
+</body>
+</html>
+3. Set Up Vulnerable Database
+bash# Login to MySQL
+sudo mysql -u root
+
+# Run these SQL commands:
+sqlCREATE DATABASE IF NOT EXISTS ccdc_scores;
+USE ccdc_scores;
+
+-- Create vulnerable user
+CREATE USER 'scoreuser'@'localhost' IDENTIFIED BY 'score123';
+GRANT ALL PRIVILEGES ON ccdc_scores.* TO 'scoreuser'@'localhost';
+GRANT FILE ON *.* TO 'scoreuser'@'localhost';  -- BAD: File privileges
+
+-- Create tables
+CREATE TABLE users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(50),
+    password VARCHAR(50)  -- BAD: Plaintext passwords
+);
+
+CREATE TABLE scores (
+    team_id INT,
+    service VARCHAR(50),
+    points INT,
+    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert vulnerable default data
+INSERT INTO users (username, password) VALUES 
+    ('admin', 'admin'),
+    ('scorebot', 'password123'),
+    ('guest', 'guest');
+
+INSERT INTO scores (team_id, service, points) VALUES
+    (1, 'Web Server', 100),
+    (1, 'DNS', 100),
+    (2, 'Web Server', 95),
+    (2, 'DNS', 100);
+4. Add More Vulnerable Endpoints
+Create /var/www/html/scoring/api.php:
+php<?php
+// Vulnerable API endpoint - No authentication!
+header('Content-Type: application/json');
+
+// Command injection vulnerability
+if(isset($_GET['ping'])) {
+    $host = $_GET['ping'];
+    // BAD: Direct command execution
+    $output = shell_exec("ping -c 1 " . $host);
+    echo json_encode(['result' => $output]);
+}
+
+// Local file inclusion
+if(isset($_GET['page'])) {
+    $page = $_GET['page'];
+    // BAD: LFI vulnerability
+    include("/var/www/html/" . $page);
+}
+
+// Insecure file upload
+if(isset($_FILES['upload'])) {
+    $target = "/var/www/html/uploads/" . $_FILES['upload']['name'];
+    // BAD: No file type validation
+    move_uploaded_file($_FILES['upload']['tmp_name'], $target);
+    echo json_encode(['status' => 'uploaded', 'file' => $target]);
+}
+?>
+5. Create Vulnerable Configuration Files
+Create /var/www/html/scoring/.htaccess:
+apache# BAD: Directory listing enabled
+Options +Indexes
+
+# BAD: Allows .php files in uploads
+<FilesMatch "\.ph(p[2-7]?|tml)$">
+    SetHandler application/x-httpd-php
+</FilesMatch>
+Create /var/www/html/scoring/config.php:
+php<?php
+// BAD: Sensitive info in web-accessible file
+define('DB_HOST', 'localhost');
+define('DB_USER', 'scoreuser');
+define('DB_PASS', 'score123');
+define('DB_NAME', 'ccdc_scores');
+
+// BAD: Debug mode enabled
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+// BAD: Weak session config
+ini_set('session.cookie_httponly', 0);
+ini_set('session.cookie_secure', 0);
+?>
+6. Enable Vulnerable Apache Modules
+bash# Enable potentially dangerous modules
+sudo a2enmod cgi
+sudo a2enmod userdir
+sudo a2enmod autoindex
+sudo a2enmod info
+sudo a2enmod status
+
+# Create vulnerable Apache config
+sudo nano /etc/apache2/sites-available/scoring.conf
+Add to scoring.conf:
+apache<VirtualHost *:80>
+    ServerName cerebrum.mindmend.ai
+    DocumentRoot /var/www/html/scoring
+    
+    <Directory /var/www/html/scoring>
+        Options Indexes FollowSymLinks ExecCGI
+        AllowOverride All
+        Require all granted
+    </Directory>
+    
+    # BAD: Server status exposed
+    <Location /server-status>
+        SetHandler server-status
+        Require all granted
+    </Location>
+    
+    # BAD: Server info exposed  
+    <Location /server-info>
+        SetHandler server-info
+        Require all granted
+    </Location>
+</VirtualHost>
+Enable the site:
+bashsudo a2ensite scoring.conf
+sudo systemctl reload apache2
+7. Test Vulnerabilities
+Access these URLs to verify:
+
+http://cerebrum.mindmend.ai/ - Main scoring page
+http://cerebrum.mindmend.ai/scoring/api.php?ping=127.0.0.1 - Command injection
+http://cerebrum.mindmend.ai/server-status - Exposed server info
+http://cerebrum.mindmend.ai/scoring/config.php - Exposed credentials
+
+Vulnerabilities Created:
+
+SQL Injection - Login and score queries
+Command Injection - API ping endpoint
+XSS - Team name display
+LFI - Page parameter
+Unrestricted File Upload - API upload
+Information Disclosure - Config files, server status
+Weak Authentication - Default credentials
+Directory Traversal - Include statements
+
+This gives blue teams a realistic vulnerable web-based scoring system to defend on port 80!
