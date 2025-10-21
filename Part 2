@@ -1,0 +1,158 @@
+1) Safety first: required constraints
+
+Before you deploy anything intentionally vulnerable, do this:
+
+Run on an isolated network (no internet access or routed to production). Use a separate VLAN or host-only network.
+
+Run inside a VM or Docker host that you can snapshot and revert.
+
+Disable port forwarding to the internet; allow access only from your competition network or judges network.
+
+Keep snapshots before/after every change so you can restore quickly.
+
+Only deploy on systems you own or are explicitly authorized to use.
+
+2) Recommended deployment: Docker (isolated + reproducible)
+
+Use Docker Compose to package Apache+PHP and MySQL. This keeps the app contained and easy to snapshot or destroy.
+
+docker-compose.yml (example) — put this in a folder with scoring/ (your app) and db/seed.sql:
+
+version: "3.7"
+services:
+  mysql:
+    image: mysql:5.7
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: ccdc_scores
+      MYSQL_USER: scoreuser
+      MYSQL_PASSWORD: score123
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    networks:
+      - ccdc_net
+
+  web:
+    image: php:7.4-apache
+    ports:
+      - "8080:80"      # map to host port; restrict in firewall
+    volumes:
+      - ./scoring:/var/www/html/scoring:rw
+      - ./scoring/index.php:/var/www/html/index.php:rw
+      - ./scoring/api.php:/var/www/html/api.php:rw
+      - ./scoring/.htaccess:/var/www/html/scoring/.htaccess:ro
+    depends_on:
+      - mysql
+    networks:
+      - ccdc_net
+
+volumes:
+  db_data:
+
+networks:
+  ccdc_net:
+    driver: bridge
+
+
+Run with docker-compose up -d.
+
+Access on the host at http://localhost:8080/scoring/ (or adjust ports).
+
+Because it runs inside Docker bridge network, it’s simple to firewall or drop external access.
+
+3) Seed DB safely (no production credentials)
+
+Create db/seed.sql with your schema & seed rows (the SQL you already listed). Put it in the compose folder so MySQL initializes it. Example (trimmed):
+
+CREATE DATABASE IF NOT EXISTS ccdc_scores;
+USE ccdc_scores;
+CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT, username VARCHAR(50), password VARCHAR(50));
+CREATE TABLE scores (team_id INT, service VARCHAR(50), points INT, last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+INSERT INTO users (username, password) VALUES ('admin','admin'), ('guest','guest');
+INSERT INTO scores (team_id, service, points) VALUES (1,'Web Server',100),(1,'DNS',100);
+
+
+(You already wrote this — keep it but do not use these credentials on any external systems.)
+
+4) Scoring architecture ideas (fair, auditable)
+
+You want a scored engine where teams earn/lose points for service availability and for attackers’ successes. Options:
+
+Periodic checks (judge-run): A scoring backend polls each team’s service endpoints (HTTP, DNS, etc.) every N seconds. If the endpoint responds with expected content, award points. If it’s changed (defacement, flag missing), deduct.
+
+Flag-based scoring (red team injects flag): Red team can upload or change a specific file/DB value. If the defending blue team prevents change, they keep points. If red succeeds, points shift.
+
+Service-oriented scoring: Give each service a weight (Web=100, DNS=100). Deduct for compromise.
+
+Automated score API: Implement a secure scoring API (token-authenticated) that judges use to report service status. Example endpoint: POST /score/report with team_id, service, status.
+
+Immutable logs: Keep all scoring actions logged to an append-only store (syslog, ELK, or write-once files with snapshots). Makes disputes easy to audit.
+
+5) Suggested scoring checks (non-exploitative)
+
+For the web service:
+
+Content check: The scoring engine can request GET /scoring/health which returns a canonical JSON or string ({"service":"web","status":"ok","signature":"TEAM123"}). Make the app optionally serve a static signature. The defending team should ensure the file remains intact.
+
+Integrity check: A scoring script checks file flag.txt content (if you use a flag model). If missing or altered, mark as compromise.
+
+Malicious change detection: Check for unexpected PHP files in /uploads (untrusted upload/location).
+
+Log checking: Look for creation of shells, webshell patterns, or inclusion of <?php system in webroot.
+
+6) Defensive/blue-team telemetry & detection hooks
+
+Make it easy for blue teams to detect and respond:
+
+Expose logs: Mount /var/log/apache2 to a volume and forward logs to a central ELK/Graylog/Splunk instance (or simply docker logs for small events).
+
+File integrity monitoring: Provide an example tool (Tripwire or inotify + checksum) that monitors index.php, config.php, and uploads/.
+
+Alerting: Integrate with email/Slack/REST webhook when certain suspicious events occur (new PHP file in uploads, config file access).
+
+Honeypot endpoints: Add decoy admin pages or hidden flags that, if accessed, trigger alerts.
+
+WAF & ModSecurity: Encourage teams to deploy ModSecurity rules in front of the app as an exercise.
+
+Process & network monitoring: Recommend OS-level agents (OSSEC, Wazuh) so teams practice SIEM alerts.
+
+7) Scoring automation & scoreboard
+
+Create a central scoring server that runs checks and aggregates points.
+
+Use a database (Postgres/MySQL) for scoreboard state and keep timestamps for every action.
+
+Provide a web interface for judges to adjust points manually and see raw check logs.
+
+Export CSV/JSON for post-competition adjudication.
+
+8) Variants and difficulty tuning
+
+Make several versions of the app (easy → hard):
+
+Level 1 (basic): SQLi on login, simple XSS.
+
+Level 2: Add file upload + LFI.
+
+Level 3: Add chained vulns requiring multiple steps (e.g., upload → LFI → RCE).
+Tune point values based on complexity and expected time to compromise.
+
+9) Prevent accidental misuse
+
+Use non-routable IPs and strict firewall rules.
+
+Put a big README in the repo stating “For internal/lab use only — do not deploy publicly.”
+
+Rotate or randomize any sample credentials/flags per team so one team’s change doesn’t affect others.
+
+10) Example additions to your app for scoring & telemetry (safe)
+
+You can add:
+
+health.php returning a signed JSON (used by scoring checks).
+
+/uploads/ scanning script (flagged by scoring engine if suspicious files exist).
+
+Logging hook that writes important events to /var/log/ccdc_app.log (scoring server tails this).
